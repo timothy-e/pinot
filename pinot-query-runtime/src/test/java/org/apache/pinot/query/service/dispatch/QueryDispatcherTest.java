@@ -267,8 +267,17 @@ public class QueryDispatcherTest extends QueryTestSet {
   }
 
   @Test
-  public void testStatsManagerNotRecordedWhenDispatchFails()
-      throws Exception {
+  public void testNoStatsRecordedWhenDispatchFails() throws Exception {
+    // Stub submit() to throw before recordStatsForQuerySubmission runs. The finally block must
+    // make zero interactions with statsManager — guarding against a decrement without a prior
+    // increment in ServerRoutingStatsManager's in-flight tracking.
+    // Using doThrow on submit() directly is deterministic; relying on gRPC obs.onError() timing
+    // is not (error delivery order varies with channel warmup state).
+    QueryDispatcher spyDispatcher = Mockito.spy(_queryDispatcher);
+    Mockito.doThrow(new RuntimeException("simulated failure"))
+        .when(spyDispatcher)
+        .submit(Mockito.anyLong(), Mockito.any(), Mockito.anyLong(), Mockito.any(), Mockito.any());
+
     ServerRoutingStatsManager statsManager = Mockito.mock(ServerRoutingStatsManager.class);
     QueryServer failingServer = _queryServerMap.values().iterator().next();
     Mockito.doAnswer(inv -> {
@@ -283,11 +292,12 @@ public class QueryDispatcherTest extends QueryTestSet {
     context.setRequestId(requestId);
     DispatchableSubPlan plan = _queryEnvironment.planQuery(sql);
 
-    try (QueryThreadContext ignore = QueryThreadContext.openForMseTest()) {
-      _queryDispatcher.submitAndReduce(context, plan, 10_000L, Map.of(), statsManager);
-    } catch (Exception e) {
-      // dispatch failed — expected
-    }
+    RuntimeException thrown = Assert.expectThrows(RuntimeException.class, () -> {
+      try (QueryThreadContext ignore = QueryThreadContext.openForMseTest()) {
+        spyDispatcher.submitAndReduce(context, plan, 10_000L, Map.of(), statsManager);
+      }
+    });
+    Assert.assertEquals(thrown.getMessage(), "simulated failure");
 
     // Stats are only recorded after submit() succeeds; when dispatch fails, no stats interactions occur
     Mockito.verifyNoInteractions(statsManager);
